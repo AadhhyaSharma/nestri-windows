@@ -29,60 +29,56 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Install GStreamer (runtime + dev)
+        shell: pwsh
         run: |
           $gst_ver = "1.24.10"
           $base_url = "https://gstreamer.freedesktop.org/data/pkg/windows/$gst_ver/msvc"
 
           Write-Host "Downloading GStreamer runtime..."
-          Invoke-WebRequest -Uri "$base_url/gstreamer-1.0-msvc-x86_64-$gst_ver.msi" -OutFile gst-runtime.msi
+          Invoke-WebRequest -Uri "$base_url/gstreamer-1.0-msvc-x86_64-$gst_ver.msi" -OutFile gst-runtime.msi -TimeoutSec 300
           Write-Host "Downloading GStreamer dev..."
-          Invoke-WebRequest -Uri "$base_url/gstreamer-1.0-devel-msvc-x86_64-$gst_ver.msi" -OutFile gst-devel.msi
+          Invoke-WebRequest -Uri "$base_url/gstreamer-1.0-devel-msvc-x86_64-$gst_ver.msi" -OutFile gst-devel.msi -TimeoutSec 300
 
           Write-Host "Installing GStreamer runtime..."
           Start-Process msiexec.exe -Wait -ArgumentList '/i gst-runtime.msi /quiet INSTALLDIR="C:\gstreamer\1.0\msvc_x86_64"'
           Write-Host "Installing GStreamer dev..."
           Start-Process msiexec.exe -Wait -ArgumentList '/i gst-devel.msi /quiet INSTALLDIR="C:\gstreamer\1.0\msvc_x86_64"'
 
-          # Add to PATH
           echo "C:\gstreamer\1.0\msvc_x86_64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           echo "GSTREAMER_1_0_ROOT_MSVC_X86_64=C:\gstreamer\1.0\msvc_x86_64" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           echo "PKG_CONFIG_PATH=C:\gstreamer\1.0\msvc_x86_64\lib\pkgconfig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-        shell: pwsh
+          Write-Host "GStreamer installed OK"
 
       - name: Install pkg-config
-        run: |
-          choco install pkgconfiglite -y
         shell: pwsh
+        run: choco install pkgconfiglite -y --no-progress
 
       - name: Build nestri-server.exe
+        shell: pwsh
         run: |
-          cargo build --release --target x86_64-pc-windows-msvc
+          cargo build --release --target x86_64-pc-windows-msvc 2>&1
         env:
           GSTREAMER_1_0_ROOT_MSVC_X86_64: C:\gstreamer\1.0\msvc_x86_64
           PKG_CONFIG_PATH: C:\gstreamer\1.0\msvc_x86_64\lib\pkgconfig
 
-      - name: Build nestri-launcher.exe
-        run: |
-          rustc installer/nestri-launcher.rs `
-            --edition 2021 `
-            --target x86_64-pc-windows-msvc `
-            -O `
-            --extern windows `
-            -L target/x86_64-pc-windows-msvc/release/deps `
-            -o target/x86_64-pc-windows-msvc/release/nestri-launcher.exe `
-            --crate-type bin `
-            -C link-args="/SUBSYSTEM:WINDOWS"
-        shell: pwsh
-        continue-on-error: true
-
       - name: Prepare dist folder
+        shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist
-          Copy-Item target\x86_64-pc-windows-msvc\release\nestri-windows.exe dist\nestri-server.exe -ErrorAction SilentlyContinue
-          if (Test-Path target\x86_64-pc-windows-msvc\release\nestri-launcher.exe) {
-            Copy-Item target\x86_64-pc-windows-msvc\release\nestri-launcher.exe dist\
+
+          # Main server binary
+          if (Test-Path "target\x86_64-pc-windows-msvc\release\nestri-windows.exe") {
+            Copy-Item "target\x86_64-pc-windows-msvc\release\nestri-windows.exe" "dist\nestri-server.exe"
+            Write-Host "Copied nestri-server.exe"
+          } elseif (Test-Path "target\x86_64-pc-windows-msvc\release\nestri_windows.exe") {
+            Copy-Item "target\x86_64-pc-windows-msvc\release\nestri_windows.exe" "dist\nestri-server.exe"
+            Write-Host "Copied nestri-server.exe (underscore variant)"
+          } else {
+            Write-Host "WARNING: nestri-server binary not found, listing release dir:"
+            Get-ChildItem "target\x86_64-pc-windows-msvc\release\*.exe" | Select-Object Name
           }
-          # Bundle GStreamer runtime DLLs needed at runtime
+
+          # GStreamer runtime DLLs
           $gst_bin = "C:\gstreamer\1.0\msvc_x86_64\bin"
           $dlls = @(
             "gstreamer-1.0-0.dll","gstbase-1.0-0.dll","gstvideo-1.0-0.dll",
@@ -94,14 +90,12 @@ jobs:
           )
           foreach ($dll in $dlls) {
             $src = Join-Path $gst_bin $dll
-            if (Test-Path $src) {
-              Copy-Item $src dist\
-              Write-Host "Copied: $dll"
-            }
+            if (Test-Path $src) { Copy-Item $src dist\; Write-Host "DLL: $dll" }
           }
-          # Copy GStreamer plugins needed
+
+          # GStreamer plugins
           $plugin_dir = "C:\gstreamer\1.0\msvc_x86_64\lib\gstreamer-1.0"
-          New-Item -ItemType Directory -Force -Path dist\gstreamer-1.0
+          New-Item -ItemType Directory -Force -Path "dist\gstreamer-1.0"
           $plugins = @(
             "gstd3d11.dll","gstwasapi.dll","gstnvcodec.dll",
             "gstwebrtc.dll","gstrtp.dll","gstrtpmanager.dll",
@@ -110,12 +104,10 @@ jobs:
           )
           foreach ($p in $plugins) {
             $src = Join-Path $plugin_dir $p
-            if (Test-Path $src) {
-              Copy-Item $src dist\gstreamer-1.0\
-              Write-Host "Copied plugin: $p"
-            }
+            if (Test-Path $src) { Copy-Item $src "dist\gstreamer-1.0\"; Write-Host "Plugin: $p" }
           }
-          # Write default nestri.env
+
+          # nestri.env default config
           @"
 NESTRI_ROOM=nestri-windows
 NESTRI_RELAY_URL=/dnsaddr/relay.dathorse.com/p2p/12D3KooWPK4v5wKYNYx9oXWjqLM8Xix6nm13o91j1Feqq98fLBsw
@@ -128,74 +120,96 @@ NESTRI_FRAMERATE=60
 NESTRI_MONITOR=0
 NESTRI_AUDIO_BITRATE=128
 "@ | Out-File -FilePath dist\nestri.env -Encoding utf8
-          Write-Host "Dist contents:"
-          Get-ChildItem dist -Recurse | Select-Object FullName
-        shell: pwsh
+
+          # Simple batch launcher (fallback if GUI launcher not built)
+          @"
+@echo off
+echo Starting Nestri Streaming Server...
+echo.
+echo Your stream URL: https://xtreme-gaming.pages.dev/play?room=nestri-windows
+echo.
+echo Open the URL above on any device to connect and play!
+echo Press Ctrl+C to stop streaming.
+echo.
+nestri-server.exe
+pause
+"@ | Out-File -FilePath dist\Start-Nestri.bat -Encoding ascii
+
+          Write-Host ""
+          Write-Host "=== dist folder contents ==="
+          Get-ChildItem dist -Recurse | Select-Object FullName, Length
 
       - name: Install NSIS
-        run: choco install nsis -y
         shell: pwsh
+        run: choco install nsis -y --no-progress
 
-      - name: Build installer with NSIS
-        run: |
-          # Copy nsi script to dist parent
-          Copy-Item installer\nestri-installer.nsi nestri-installer.nsi
-          & "C:\Program Files (x86)\NSIS\makensis.exe" nestri-installer.nsi
-          if (Test-Path NestriSetup.exe) {
-            Write-Host "✅ NestriSetup.exe built successfully!"
-            Get-Item NestriSetup.exe | Select-Object Name, Length
-          } else {
-            Write-Host "⚠️ NSIS build failed, creating zip bundle instead..."
-            Compress-Archive -Path dist\* -DestinationPath NestriBundle.zip
-          }
+      - name: Build NSIS installer
         shell: pwsh
         continue-on-error: true
-
-      - name: Create ZIP bundle (fallback)
         run: |
-          if (-not (Test-Path NestriSetup.exe)) {
-            Compress-Archive -Path dist\* -DestinationPath NestriSetup.zip
-            Write-Host "Created NestriSetup.zip as fallback"
+          Copy-Item installer\nestri-installer.nsi nestri-installer.nsi -ErrorAction SilentlyContinue
+          if (Test-Path nestri-installer.nsi) {
+            & "C:\Program Files (x86)\NSIS\makensis.exe" /V4 nestri-installer.nsi
+            if (Test-Path NestriSetup.exe) {
+              Write-Host "✅ NestriSetup.exe built!"
+              Get-Item NestriSetup.exe | Select-Object Name, @{N='SizeMB';E={[math]::Round($_.Length/1MB,1)}}
+            }
           }
-        shell: pwsh
 
-      - name: Upload installer artifact
+      - name: Create ZIP bundle
+        shell: pwsh
+        run: |
+          if (Test-Path NestriSetup.exe) {
+            # Already have installer — also make zip for people who prefer it
+            Compress-Archive -Path dist\* -DestinationPath NestriBundle.zip
+          } else {
+            # No installer — zip is the primary download
+            Compress-Archive -Path dist\* -DestinationPath NestriSetup.zip
+            Write-Host "Created NestriSetup.zip (extract and run nestri-server.exe)"
+          }
+
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: NestriSetup
+          name: NestriSetup-Windows
           path: |
             NestriSetup.exe
             NestriSetup.zip
+            NestriBundle.zip
           if-no-files-found: warn
           retention-days: 30
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
-        if: github.ref == 'refs/heads/main'
         with:
           tag_name: v1.0.${{ github.run_number }}
-          name: "Nestri Windows v1.0.${{ github.run_number }}"
+          name: "🎮 Nestri Windows v1.0.${{ github.run_number }}"
           body: |
-            ## 🎮 Nestri Windows Streaming Server
+            ## Nestri Windows Streaming Server
 
-            ### Download & Run
-            1. Download `NestriSetup.exe` below
-            2. Double-click to install (one-click)
-            3. Enter your room name when prompted
+            ### ⬇️ Download & Run
+            1. Download `NestriSetup.exe` (or `NestriSetup.zip` if no installer)
+            2. If `.exe`: double-click → install → done!
+               If `.zip`: extract → double-click `Start-Nestri.bat`
+            3. Edit `nestri.env` to set your room name
             4. Open **https://xtreme-gaming.pages.dev** on any device
-            5. Type your room name → Connect → game remotely!
+            5. Type your room name → Connect → game remotely! 🎮
 
             ### Requirements
             - Windows 10/11 64-bit
-            - NVIDIA GPU (RTX recommended for best quality)
+            - NVIDIA GPU (RTX recommended)
             - Internet connection
 
-            ### Stream URL format
+            ### Your stream URL
             `https://xtreme-gaming.pages.dev/play?room=YOUR-ROOM-NAME`
+
+            > Edit `nestri.env` and set `NESTRI_ROOM=your-room-name` before starting.
           files: |
             NestriSetup.exe
             NestriSetup.zip
+            NestriBundle.zip
           draft: false
           prerelease: false
+          generate_release_notes: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
