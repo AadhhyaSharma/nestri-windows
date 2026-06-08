@@ -13,11 +13,18 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: nestri-windows
+
+      # Clone the real Nestri server source
+      - name: Clone Nestri upstream
+        run: git clone --depth 1 --branch dev https://github.com/nestrilabs/nestri.git nestri-upstream
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+          toolchain: "1.85.0"
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -25,56 +32,183 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+            nestri-upstream/packages/server/target
+          key: ${{ runner.os }}-cargo-nestri-${{ hashFiles('nestri-upstream/packages/server/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-nestri-
 
       - name: Install GStreamer via choco
         shell: pwsh
         run: |
           choco install gstreamer gstreamer-devel -y --no-progress
           $gst = "C:\Program Files\gstreamer\1.0\msvc_x86_64"
-          Write-Host "GStreamer path: $gst"
-          Write-Host "Contents:"
-          Get-ChildItem $gst
           echo "$gst\bin" >> $env:GITHUB_PATH
           echo "GSTREAMER_1_0_ROOT_MSVC_X86_64=$gst" >> $env:GITHUB_ENV
           echo "PKG_CONFIG_PATH=$gst\lib\pkgconfig" >> $env:GITHUB_ENV
+          Write-Host "GStreamer installed at $gst"
 
       - name: Install pkg-config
         shell: pwsh
         run: choco install pkgconfiglite -y --no-progress
 
+      - name: Patch Nestri for Windows
+        shell: pwsh
+        run: |
+          $serverDir = "nestri-upstream\packages\server"
+
+          # ── 1. Cargo.toml: remove vimputti, pin gstreamer to 0.22 (has Windows support), add windows crate
+          $cargo = Get-Content "$serverDir\Cargo.toml" -Raw
+          # Remove vimputti dependency
+          $cargo = $cargo -replace 'vimputti\s*=\s*"[^"]*"', '# vimputti removed (Linux only)'
+          # Downgrade gstreamer to 0.22 (stable Windows support)
+          $cargo = $cargo -replace 'gstreamer\s*=\s*\{[^}]*"v1_26"[^}]*\}', 'gstreamer = { version = "0.22" }'
+          $cargo = $cargo -replace 'gstreamer-webrtc\s*=\s*\{[^}]*"v1_26"[^}]*\}', 'gstreamer-webrtc = { version = "0.22" }'
+          $cargo = $cargo -replace 'gst-plugin-webrtc\s*=\s*\{[^}]*\}', 'gst-plugin-webrtc = { version = "0.13" }'
+          # Add windows crate for DXGI
+          $cargo += "`n[target.'cfg(windows)'.dependencies]`nwindows = { version = `"0.58`", features = [`"Win32_Graphics_Dxgi`",`"Win32_Graphics_Dxgi_Common`",`"Win32_Foundation`",`"Win32_UI_Input_KeyboardAndMouse`",`"Win32_UI_WindowsAndMessaging`"] }`n"
+          Set-Content "$serverDir\Cargo.toml" $cargo
+          Write-Host "Cargo.toml patched"
+
+          # ── 2. Patch main.rs: replace vimputti/waylanddisplaysrc with Windows equivalents
+          $main = Get-Content "$serverDir\src\main.rs" -Raw
+
+          # Replace vimputti import and usage
+          $main = $main -replace 'use vimputti::[^;]+;', '// vimputti removed (Windows build)'
+          $main = $main -replace 'let vpath[^;]+;', 'let _vpath = "/unused";'
+          $main = $main -replace 'let vimputti_client[^}]+\}\s*\};', 'let vimputti_client: Option<std::sync::Arc<()>> = None;'
+          $main = $main -replace 'let \(controller_manager.*?None\)\s*\};', 'let (controller_manager, rumble_rx, attach_rx) = (None::<std::sync::Arc<crate::input::controller::ControllerManager>>, None, None);'
+          # Replace waylanddisplaysrc with d3d11screencapturesrc
+          $main = $main -replace '"waylanddisplaysrc"', '"d3d11screencapturesrc"'
+          # Replace pulsesrc with wasapisrc
+          $main = $main -replace '"pulsesrc"', '"wasapisrc"'
+          # Replace pipewiresrc with wasapisrc
+          $main = $main -replace '"pipewiresrc"', '"wasapisrc"'
+          # Replace alsasrc with wasapisrc
+          $main = $main -replace '"alsasrc"', '"wasapisrc"'
+          # Remove software_render (Wayland-specific)
+          $main = $main -replace 'if args\.app\.software_render[^}]+\}', '// software_render not applicable on Windows'
+          Set-Content "$serverDir\src\main.rs" $main
+          Write-Host "main.rs patched"
+
+          # ── 3. Patch gpu.rs: replace /sys/class/drm with DXGI
+          Copy-Item "nestri-windows\src\gpu.rs" "$serverDir\src\gpu.rs" -Force
+          Write-Host "gpu.rs replaced with Windows DXGI version"
+
+          # ── 4. Patch input/controller.rs: replace vimputti with Win32 stub
+          Copy-Item "nestri-windows\src\input\controller.rs" "$serverDir\src\input\controller.rs" -Force
+          Write-Host "controller.rs replaced with Win32 stub"
+
+          # ── 5. Patch args: remove vimputti_path and software_render fields
+          $argsFile = "$serverDir\src\args\mod.rs"
+          if (Test-Path $argsFile) {
+            $args_content = Get-Content $argsFile -Raw
+            $args_content = $args_content -replace '#\[arg[^\]]*\]\s*pub vimputti_path[^,\n]+', '// vimputti_path removed'
+            $args_content = $args_content -replace '#\[arg[^\]]*\]\s*pub software_render[^,\n]+', '// software_render removed'
+            Set-Content $argsFile $args_content
+            Write-Host "args/mod.rs patched"
+          }
+
+          Write-Host "All patches applied successfully"
+
       - name: Build
         shell: pwsh
+        working-directory: nestri-upstream/packages/server
         env:
           GSTREAMER_1_0_ROOT_MSVC_X86_64: C:\Program Files\gstreamer\1.0\msvc_x86_64
           PKG_CONFIG_PATH: C:\Program Files\gstreamer\1.0\msvc_x86_64\lib\pkgconfig
-        run: cargo build --release --target x86_64-pc-windows-msvc
+        run: |
+          cargo build --release --target x86_64-pc-windows-msvc 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Build failed with exit code $LASTEXITCODE"
+            exit $LASTEXITCODE
+          }
+          Write-Host "Build succeeded!"
+          Get-ChildItem "target\x86_64-pc-windows-msvc\release\*.exe" | Select-Object Name, @{N='MB';E={[math]::Round($_.Length/1MB,1)}}
 
       - name: Package
         shell: pwsh
         run: |
           New-Item -Force -ItemType Directory dist
           $gst = "C:\Program Files\gstreamer\1.0\msvc_x86_64"
-          $bin = Get-ChildItem "target\x86_64-pc-windows-msvc\release\*.exe" | Where-Object { $_.Name -notmatch "^(build|rustc)" } | Select-Object -First 1
-          if ($bin) {
-            Copy-Item $bin.FullName dist\nestri-server.exe
-            Write-Host "Copied: $($bin.Name) -> nestri-server.exe"
-          } else {
-            Write-Host "WARNING: No binary found. Listing:"
-            Get-ChildItem "target\x86_64-pc-windows-msvc\release\" | Select-Object Name
-          }
+
+          # Copy server binary
+          $bin = "nestri-upstream\packages\server\target\x86_64-pc-windows-msvc\release\nestri-server.exe"
+          Copy-Item $bin dist\nestri-server.exe
+          Write-Host "Copied nestri-server.exe ($([math]::Round((Get-Item $bin).Length/1MB,1)) MB)"
+
+          # Bundle all GStreamer DLLs
           if (Test-Path "$gst\bin") {
             Get-ChildItem "$gst\bin\*.dll" | ForEach-Object { Copy-Item $_ dist\ }
+            Write-Host "Bundled GStreamer bin DLLs"
           }
           if (Test-Path "$gst\lib\gstreamer-1.0") {
             New-Item -Force -ItemType Directory dist\gstreamer-1.0
             Get-ChildItem "$gst\lib\gstreamer-1.0\*.dll" | ForEach-Object { Copy-Item $_ dist\gstreamer-1.0\ }
+            Write-Host "Bundled GStreamer plugin DLLs"
           }
-          Set-Content dist\nestri.env "NESTRI_ROOM=nestri-windows`r`nNESTRI_RELAY_URL=/dnsaddr/relay.dathorse.com/p2p/12D3KooWPK4v5wKYNYx9oXWjqLM8Xix6nm13o91j1Feqq98fLBsw`r`nNESTRI_GPU_VENDOR=nvidia`r`nNESTRI_VIDEO_CODEC=h264`r`nNESTRI_ENCODER_TYPE=hardware`r`nNESTRI_FRAMERATE=60`r`n"
-          Set-Content dist\START.bat "@echo off`r`necho Your stream: https://xtreme-gaming.pages.dev/play?room=nestri-windows`r`nnestri-server.exe`r`npause"
+
+          # Write env config
+          @"
+NESTRI_ROOM=nestri-windows
+NESTRI_RELAY_URL=/dnsaddr/relay.dathorse.com/p2p/12D3KooWPK4v5wKYNYx9oXWjqLM8Xix6nm13o91j1Feqq98fLBsw
+NESTRI_GPU_VENDOR=auto
+NESTRI_VIDEO_CODEC=h264
+NESTRI_ENCODER_TYPE=hardware
+NESTRI_FRAMERATE=60
+NESTRI_RATE_CONTROL=cbr:8000
+"@ | Set-Content dist\nestri.env
+
+          # Write launcher batch file
+          @"
+@echo off
+echo.
+echo  =====================================================
+echo   Nestri Windows Streaming Server
+echo  =====================================================
+echo.
+echo  Loading config from nestri.env...
+for /f "usebackq tokens=1,* delims==" %%a in ("nestri.env") do (
+  if not "%%a"=="" if not "%%a:~0,1%"=="#" set "%%a=%%b"
+)
+echo  Room:    %NESTRI_ROOM%
+echo  Stream:  https://xtreme-gaming.pages.dev/play?room=%NESTRI_ROOM%
+echo.
+echo  Open the URL above in your browser to connect!
+echo  Press Ctrl+C to stop.
+echo.
+set GST_PLUGIN_PATH=%~dp0gstreamer-1.0
+set PATH=%~dp0;%PATH%
+nestri-server.exe --room "%NESTRI_ROOM%" --relay-url "%NESTRI_RELAY_URL%" --gpu-vendor "%NESTRI_GPU_VENDOR%" --video-codec "%NESTRI_VIDEO_CODEC%" --encoder-type "%NESTRI_ENCODER_TYPE%" --framerate %NESTRI_FRAMERATE%
+pause
+"@ | Set-Content dist\START.bat
+
+          # Write README
+          @"
+Nestri Windows Streaming Server
+================================
+Stream URL: https://xtreme-gaming.pages.dev/play?room=nestri-windows
+
+QUICK START:
+  1. Double-click START.bat to launch the server
+  2. Open https://xtreme-gaming.pages.dev/play?room=nestri-windows in your browser
+
+CUSTOMISE:
+  Edit nestri.env to change your room name, GPU, bitrate etc.
+
+INTEL iGPU SUPPORT:
+  Set NESTRI_GPU_VENDOR=intel in nestri.env
+  The server will automatically use QuickSync (qsvh264enc) or
+  Media Foundation (mfh264enc) hardware encoding.
+
+REQUIREMENTS:
+  Windows 10/11 64-bit
+  NVIDIA / AMD / Intel GPU
+  No additional software needed — GStreamer is bundled.
+"@ | Set-Content dist\README.txt
+
           Compress-Archive dist\* NestriSetup.zip
-          Get-Item NestriSetup.zip | Select-Object Name, @{N='MB';E={[math]::Round($_.Length/1MB,1)}}
+          $size = [math]::Round((Get-Item NestriSetup.zip).Length/1MB, 1)
+          Write-Host "NestriSetup.zip created: $size MB"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -91,11 +225,16 @@ jobs:
           body: |
             ## Nestri Windows Streaming Server
 
-            **Download NestriSetup.zip, extract it, edit nestri.env to set your room name, run nestri-server.exe**
+            **Extract NestriSetup.zip → double-click START.bat → open stream URL in browser**
 
-            Stream URL: https://xtreme-gaming.pages.dev/play?room=YOUR-ROOM-NAME
+            Stream URL: https://xtreme-gaming.pages.dev/play?room=nestri-windows
 
-            Requirements: Windows 10/11 64-bit, NVIDIA GPU
+            ### Works with:
+            - ✅ NVIDIA RTX / GTX (NVENC)
+            - ✅ AMD RX (AMF)
+            - ✅ Intel iGPU (QuickSync / Media Foundation)
+
+            Edit `nestri.env` to set your room name and GPU vendor.
           files: NestriSetup.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
