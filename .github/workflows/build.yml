@@ -32,11 +32,13 @@ jobs:
         shell: pwsh
         run: |
           choco install gstreamer gstreamer-devel -y --no-progress
-          $gst = "C:\gstreamer\1.0\msvc_x86_64"
+          $gst = "C:\Program Files\gstreamer\1.0\msvc_x86_64"
+          Write-Host "GStreamer path: $gst"
+          Write-Host "Contents:"
+          Get-ChildItem $gst
           echo "$gst\bin" >> $env:GITHUB_PATH
           echo "GSTREAMER_1_0_ROOT_MSVC_X86_64=$gst" >> $env:GITHUB_ENV
           echo "PKG_CONFIG_PATH=$gst\lib\pkgconfig" >> $env:GITHUB_ENV
-          Write-Host "GStreamer installed at $gst"
 
       - name: Install pkg-config
         shell: pwsh
@@ -45,15 +47,15 @@ jobs:
       - name: Build
         shell: pwsh
         env:
-          GSTREAMER_1_0_ROOT_MSVC_X86_64: C:\gstreamer\1.0\msvc_x86_64
-          PKG_CONFIG_PATH: C:\gstreamer\1.0\msvc_x86_64\lib\pkgconfig
+          GSTREAMER_1_0_ROOT_MSVC_X86_64: C:\Program Files\gstreamer\1.0\msvc_x86_64
+          PKG_CONFIG_PATH: C:\Program Files\gstreamer\1.0\msvc_x86_64\lib\pkgconfig
         run: cargo build --release --target x86_64-pc-windows-msvc
 
       - name: Package
         shell: pwsh
         run: |
           New-Item -Force -ItemType Directory dist
-          $gst = "C:\gstreamer\1.0\msvc_x86_64"
+          $gst = "C:\Program Files\gstreamer\1.0\msvc_x86_64"
           $bin = Get-ChildItem "target\x86_64-pc-windows-msvc\release\*.exe" | Where-Object { $_.Name -notmatch "^(build|rustc)" } | Select-Object -First 1
           if ($bin) {
             Copy-Item $bin.FullName dist\nestri-server.exe
@@ -72,7 +74,6 @@ jobs:
           Set-Content dist\nestri.env "NESTRI_ROOM=nestri-windows`r`nNESTRI_RELAY_URL=/dnsaddr/relay.dathorse.com/p2p/12D3KooWPK4v5wKYNYx9oXWjqLM8Xix6nm13o91j1Feqq98fLBsw`r`nNESTRI_GPU_VENDOR=nvidia`r`nNESTRI_VIDEO_CODEC=h264`r`nNESTRI_ENCODER_TYPE=hardware`r`nNESTRI_FRAMERATE=60`r`n"
           Set-Content dist\START.bat "@echo off`r`necho Your stream: https://xtreme-gaming.pages.dev/play?room=nestri-windows`r`nnestri-server.exe`r`npause"
           Compress-Archive dist\* NestriSetup.zip
-          Write-Host "Package ready:"
           Get-Item NestriSetup.zip | Select-Object Name, @{N='MB';E={[math]::Round($_.Length/1MB,1)}}
 
       - name: Upload artifact
@@ -90,7 +91,7 @@ jobs:
           body: |
             ## Nestri Windows Streaming Server
 
-            **Download NestriSetup.zip below, extract it, edit nestri.env to set your room name, run nestri-server.exe**
+            **Download NestriSetup.zip, extract it, edit nestri.env to set your room name, run nestri-server.exe**
 
             Stream URL: https://xtreme-gaming.pages.dev/play?room=YOUR-ROOM-NAME
 
