@@ -28,18 +28,15 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Install GStreamer
+      - name: Install GStreamer via choco
         shell: pwsh
         run: |
-          $ver = "1.24.10"
-          $base = "https://gstreamer.freedesktop.org/data/pkg/windows/$ver/msvc"
-          Invoke-WebRequest "$base/gstreamer-1.0-msvc-x86_64-$ver.msi" -OutFile rt.msi -TimeoutSec 300
-          Invoke-WebRequest "$base/gstreamer-1.0-devel-msvc-x86_64-$ver.msi" -OutFile dev.msi -TimeoutSec 300
-          Start-Process msiexec -Wait -Args '/i rt.msi /quiet INSTALLDIR=C:\gst'
-          Start-Process msiexec -Wait -Args '/i dev.msi /quiet INSTALLDIR=C:\gst'
-          echo "C:\gst\bin" >> $env:GITHUB_PATH
-          echo "GSTREAMER_1_0_ROOT_MSVC_X86_64=C:\gst" >> $env:GITHUB_ENV
-          echo "PKG_CONFIG_PATH=C:\gst\lib\pkgconfig" >> $env:GITHUB_ENV
+          choco install gstreamer gstreamer-devel -y --no-progress
+          $gst = "C:\gstreamer\1.0\msvc_x86_64"
+          echo "$gst\bin" >> $env:GITHUB_PATH
+          echo "GSTREAMER_1_0_ROOT_MSVC_X86_64=$gst" >> $env:GITHUB_ENV
+          echo "PKG_CONFIG_PATH=$gst\lib\pkgconfig" >> $env:GITHUB_ENV
+          Write-Host "GStreamer installed at $gst"
 
       - name: Install pkg-config
         shell: pwsh
@@ -48,22 +45,35 @@ jobs:
       - name: Build
         shell: pwsh
         env:
-          GSTREAMER_1_0_ROOT_MSVC_X86_64: C:\gst
-          PKG_CONFIG_PATH: C:\gst\lib\pkgconfig
+          GSTREAMER_1_0_ROOT_MSVC_X86_64: C:\gstreamer\1.0\msvc_x86_64
+          PKG_CONFIG_PATH: C:\gstreamer\1.0\msvc_x86_64\lib\pkgconfig
         run: cargo build --release --target x86_64-pc-windows-msvc
 
       - name: Package
         shell: pwsh
         run: |
           New-Item -Force -ItemType Directory dist
-          $bin = Get-ChildItem "target\x86_64-pc-windows-msvc\release\*.exe" | Where-Object { $_.Name -notlike "*.d" } | Select-Object -First 1
-          if ($bin) { Copy-Item $bin.FullName dist\nestri-server.exe }
-          foreach ($dll in (Get-ChildItem "C:\gst\bin\*.dll")) { Copy-Item $dll dist\ }
-          New-Item -Force -ItemType Directory dist\gstreamer-1.0
-          foreach ($p in (Get-ChildItem "C:\gst\lib\gstreamer-1.0\*.dll")) { Copy-Item $p dist\gstreamer-1.0\ }
-          Set-Content dist\nestri.env "NESTRI_ROOM=nestri-windows`nNESTRI_RELAY_URL=/dnsaddr/relay.dathorse.com/p2p/12D3KooWPK4v5wKYNYx9oXWjqLM8Xix6nm13o91j1Feqq98fLBsw`nNESTRI_GPU_VENDOR=nvidia`nNESTRI_VIDEO_CODEC=h264`nNESTRI_ENCODER_TYPE=hardware`nNESTRI_FRAMERATE=60`nNESTRI_RATE_CONTROL=cbr:8000`n"
-          Set-Content dist\START.bat "@echo off`necho Your stream URL: https://xtreme-gaming.pages.dev/play?room=nestri-windows`nnestri-server.exe`npause"
+          $gst = "C:\gstreamer\1.0\msvc_x86_64"
+          $bin = Get-ChildItem "target\x86_64-pc-windows-msvc\release\*.exe" | Where-Object { $_.Name -notmatch "^(build|rustc)" } | Select-Object -First 1
+          if ($bin) {
+            Copy-Item $bin.FullName dist\nestri-server.exe
+            Write-Host "Copied: $($bin.Name) -> nestri-server.exe"
+          } else {
+            Write-Host "WARNING: No binary found. Listing:"
+            Get-ChildItem "target\x86_64-pc-windows-msvc\release\" | Select-Object Name
+          }
+          if (Test-Path "$gst\bin") {
+            Get-ChildItem "$gst\bin\*.dll" | ForEach-Object { Copy-Item $_ dist\ }
+          }
+          if (Test-Path "$gst\lib\gstreamer-1.0") {
+            New-Item -Force -ItemType Directory dist\gstreamer-1.0
+            Get-ChildItem "$gst\lib\gstreamer-1.0\*.dll" | ForEach-Object { Copy-Item $_ dist\gstreamer-1.0\ }
+          }
+          Set-Content dist\nestri.env "NESTRI_ROOM=nestri-windows`r`nNESTRI_RELAY_URL=/dnsaddr/relay.dathorse.com/p2p/12D3KooWPK4v5wKYNYx9oXWjqLM8Xix6nm13o91j1Feqq98fLBsw`r`nNESTRI_GPU_VENDOR=nvidia`r`nNESTRI_VIDEO_CODEC=h264`r`nNESTRI_ENCODER_TYPE=hardware`r`nNESTRI_FRAMERATE=60`r`n"
+          Set-Content dist\START.bat "@echo off`r`necho Your stream: https://xtreme-gaming.pages.dev/play?room=nestri-windows`r`nnestri-server.exe`r`npause"
           Compress-Archive dist\* NestriSetup.zip
+          Write-Host "Package ready:"
+          Get-Item NestriSetup.zip | Select-Object Name, @{N='MB';E={[math]::Round($_.Length/1MB,1)}}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -80,9 +90,9 @@ jobs:
           body: |
             ## Nestri Windows Streaming Server
 
-            **Download NestriSetup.zip, extract it, edit nestri.env to set your room name, then run nestri-server.exe**
+            **Download NestriSetup.zip below, extract it, edit nestri.env to set your room name, run nestri-server.exe**
 
-            Your stream URL: https://xtreme-gaming.pages.dev/play?room=YOUR-ROOM-NAME
+            Stream URL: https://xtreme-gaming.pages.dev/play?room=YOUR-ROOM-NAME
 
             Requirements: Windows 10/11 64-bit, NVIDIA GPU
           files: NestriSetup.zip
