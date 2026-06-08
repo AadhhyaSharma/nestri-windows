@@ -1,0 +1,80 @@
+[package]
+name = "nestri-server"
+version = "0.1.0-windows"
+edition = "2024"
+
+[[bin]]
+name = "nestri-server"
+path = "src/main.rs"
+
+[dependencies]
+# GStreamer - works natively on Windows
+gstreamer = { version = "0.24", features = ["v1_22"] }
+gstreamer-webrtc = { version = "0.24", features = ["v1_22"] }
+gst-plugin-webrtc = { version = "0.14" }
+
+# Windows-specific: GPU enumeration via DXGI, input via Win32
+windows = { version = "0.58", features = [
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+] }
+
+# Virtual gamepad (XInput emulation) - replaces vimputti/uinput
+vigem-client = "0.1"
+
+# Networking / P2P - fully cross-platform, no changes needed
+libp2p = { version = "0.56", features = ["identify", "dns", "tcp", "noise", "ping", "tokio", "serde", "yamux", "macros", "autonat", "quic"] }
+libp2p-identify = "0.47"
+libp2p-ping = "0.47"
+libp2p-autonat = { version = "0.15", features = ["v2"] }
+libp2p-stream = "0.4.0-alpha"
+libp2p-yamux = "0.47"
+libp2p-noise = "0.46"
+libp2p-dns = { version = "0.44", features = ["tokio"] }
+libp2p-tcp = { version = "0.44", features = ["tokio"] }
+libp2p-quic = { version = "0.13", features = ["tokio"] }
+
+# Async runtime
+tokio = { version = "1.48", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["full"] }
+
+# Serialization / protocol
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+prost = "0.14"
+prost-types = "0.14"
+webrtc = "0.14"
+
+# Utilities
+clap = { version = "4.5", features = ["env", "derive"] }
+regex = "1.11"
+rand = "0.9"
+rustls = { version = "0.23", features = ["ring"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = "0.4"
+parking_lot = "0.12"
+byteorder = "1.5"
+dashmap = "6.1"
+anyhow = "1.0"
+unsigned-varint = "0.8"
+
+[build-dependencies]
+# Embed Windows app manifest for proper DPI awareness + admin elevation prompt
+winres = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Direct3D11",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Foundation",
+] }
