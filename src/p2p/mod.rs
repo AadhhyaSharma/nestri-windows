@@ -1,2 +1,1 @@
-pub mod p2p;
-pub mod p2p_protocol_stream;
+/// p2p stub — reserved for future relay integration
